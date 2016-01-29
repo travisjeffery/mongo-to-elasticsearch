@@ -40,8 +40,10 @@ func main() {
 
 	iter := c.Find(bson.M{"_id": bson.M{"$gte": startID, "$lte": endID}}).Sort("_id").Iter()
 	for {
+		fmt.Printf("in outer loop with id: %s\n", startID.Hex())
 		for iter.Next(&v) {
 			startID = v["_id"].(bson.ObjectId)
+
 			project := v["_project"].(string)
 			index := fmt.Sprintf("project_%s", project)
 
@@ -59,17 +61,15 @@ func main() {
 			if err != nil {
 				fmt.Printf("error indexing in elasticsearch: %s (id: %s)\n", err, startID.Hex())
 				fmt.Println(err)
-			}
-		}
-		if iter.Err() != nil {
-			fmt.Printf("iteration error: %s (id: %s)\n", iter.Err(), startID.Hex())
-
-			if err := iter.Close(); err != nil {
-				fmt.Printf("error closing cursor: %s (id: %s)\n", err, startID.Hex())
+			} else {
+				fmt.Printf("success indexing in elasticsearch: %s\n", startID.Hex())
 			}
 		}
 		if iter.Timeout() {
 			continue
+		}
+		if err := iter.Close(); err != nil {
+			fmt.Printf("error in iteration: %s (id: %s)\n", err, startID.Hex())
 		}
 		iter = c.Find(bson.M{"_id": bson.M{"$gte": startID, "$lte": endID}}).Sort("_id").Iter()
 	}
