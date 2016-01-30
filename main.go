@@ -11,11 +11,10 @@ import (
 )
 
 var (
-	startIDStr = kingpin.Flag("start", "ID to start at.").Required().String()
-	endIDStr   = kingpin.Flag("end", "ID to end at.").Required().String()
-	mongoAddr  = kingpin.Flag("mongo", "Mongo address").Required().String()
-	esAddr     = kingpin.Flag("elasticsearch", "Elasticsearch address").Required().String()
-	collection = kingpin.Flag("collection", "Collection to move from mongo, the same name will be used for the elasticsearch type").Required().String()
+	mongoAddr   = kingpin.Flag("mongo", "Mongo address").Required().String()
+	esAddr      = kingpin.Flag("elasticsearch", "Elasticsearch address").Required().String()
+	collection  = kingpin.Flag("collection", "Collection to move from mongo, the same name will be used for the elasticsearch type").Required().String()
+	concurrency = kingpin.Flag("concurrency", "Number of calls to make to es").Default("1000").Int()
 )
 
 func main() {
@@ -26,51 +25,65 @@ func main() {
 		panic(err)
 	}
 	defer session.Close()
+	session.SetMode(mgo.SecondaryPreferred, false)
+	session.SetBatch(200)
+	session.SetPrefetch(0.75)
 
 	es := elastigo.NewConn()
 	es.Domain = *esAddr
 
-	c := session.DB("").C(*collection)
-	var v map[string]interface{}
+	var val map[string]interface{}
 
 	re := regexp.MustCompile("^_+")
 
-	startID := bson.ObjectIdHex(*startIDStr)
-	endID := bson.ObjectIdHex(*endIDStr)
+	project := "54735a819b032df50644cc3e"
+	index := "project_" + project
+	ch := make(chan map[string]interface{}, *concurrency)
 
-	iter := c.Find(bson.M{"_id": bson.M{"$gte": startID, "$lte": endID}}).Sort("_id").Iter()
+	go func() {
+		for val := range ch {
+			go func(index, collection string, v map[string]interface{}) {
+				id := v["id"].(bson.ObjectId)
+
+				_, err := es.Index(index, collection, id.Hex(), nil, v)
+				if err != nil {
+					fmt.Printf("error indexing in elasticsearch: %s (id: %s)\n", err, id.Hex())
+					ch <- v
+				} else {
+					fmt.Printf("success indexing in elasticsearch: %s\n", id.Hex())
+				}
+			}(index, *collection, val)
+		}
+	}()
+
 	for {
-		fmt.Printf("in outer loop with id: %s\n", startID.Hex())
-		for iter.Next(&v) {
-			startID = v["_id"].(bson.ObjectId)
+		s := session.Copy()
+		c := s.DB("").C(*collection)
+		iter := c.Find(bson.M{"_project": project}).Iter()
 
-			project := v["_project"].(string)
-			index := fmt.Sprintf("project_%s", project)
+		fmt.Printf("in outer loop\n")
+		for iter.Next(&val) {
+			v := make(map[string]interface{})
 
 			// elasticsearch prefixes metadata with underscores so we remove them
-			for k, val := range v {
+			for k, value := range val {
 				if re.Match([]byte(k)) == false {
 					continue
 				}
 				delete(v, k)
 				k = re.ReplaceAllString(k, "")
-				v[k] = val
+				v[k] = value
 			}
 
-			_, err := es.Index(index, *collection, startID.Hex(), nil, v)
-			if err != nil {
-				fmt.Printf("error indexing in elasticsearch: %s (id: %s)\n", err, startID.Hex())
-				fmt.Println(err)
-			} else {
-				fmt.Printf("success indexing in elasticsearch: %s\n", startID.Hex())
-			}
+			ch <- v
 		}
 		if iter.Timeout() {
+			s.Close()
 			continue
 		}
 		if err := iter.Close(); err != nil {
-			fmt.Printf("error in iteration: %s (id: %s)\n", err, startID.Hex())
+			fmt.Printf("error in iteration: %s\n", err)
 		}
-		iter = c.Find(bson.M{"_id": bson.M{"$gte": startID, "$lte": endID}}).Sort("_id").Iter()
+		s.Close()
 	}
 }
