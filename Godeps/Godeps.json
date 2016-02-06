@@ -1,9 +1,6 @@
 {
 	"ImportPath": "github.com/travisjeffery/mongo-to-elasticsearch",
 	"GoVersion": "go1.5",
-	"Packages": [
-		"./..."
-	],
 	"Deps": [
 		{
 			"ImportPath": "github.com/alecthomas/template",
@@ -25,6 +22,11 @@
 			"ImportPath": "github.com/mattbaird/elastigo/lib",
 			"Comment": "v1.0-215-g8f8c8e8",
 			"Rev": "8f8c8e8cd26082435601a46b826c09e28f50d5ae"
+		},
+		{
+			"ImportPath": "github.com/segmentio/go-log",
+			"Comment": "v1.8.0-4-g9c7ea0f",
+			"Rev": "9c7ea0f744953ff5220087609a8525790dc01d8b"
 		},
 		{
 			"ImportPath": "gopkg.in/alecthomas/kingpin.v2",

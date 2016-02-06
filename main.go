@@ -1,10 +1,11 @@
 package main
 
 import (
-	"fmt"
 	"regexp"
+	"time"
 
 	elastigo "github.com/mattbaird/elastigo/lib"
+	"github.com/segmentio/go-log"
 	"gopkg.in/alecthomas/kingpin.v2"
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
@@ -15,6 +16,7 @@ var (
 	esAddr      = kingpin.Flag("elasticsearch", "Elasticsearch address").Required().String()
 	collection  = kingpin.Flag("collection", "Collection to move from mongo, the same name will be used for the elasticsearch type").Required().String()
 	concurrency = kingpin.Flag("concurrency", "Number of calls to make to es").Default("1000").Int()
+	project     = kingpin.Flag("project", "The project to move").Default("54735a819b032df50644cc3e").String()
 )
 
 func main() {
@@ -28,49 +30,52 @@ func main() {
 	session.SetMode(mgo.SecondaryPreferred, false)
 	session.SetBatch(200)
 	session.SetPrefetch(0.75)
-
-	es := elastigo.NewConn()
-	es.Domain = *esAddr
+	session.SetSocketTimeout(1 * time.Hour)
 
 	var val map[string]interface{}
 
 	re := regexp.MustCompile("^_+")
 
-	project := "54735a819b032df50644cc3e"
-	index := "project_" + project
+	index := "project_" + *project
 	ch := make(chan map[string]interface{}, *concurrency)
 
 	go func() {
-		for val := range ch {
-			go func(index, collection string, v map[string]interface{}) {
-				id := v["id"].(bson.ObjectId)
+		es := elastigo.NewConn()
+		es.Domain = *esAddr
 
-				_, err := es.Index(index, collection, id.Hex(), nil, v)
-				if err != nil {
-					fmt.Printf("error indexing in elasticsearch: %s (id: %s)\n", err, id.Hex())
-					ch <- v
-				} else {
-					fmt.Printf("success indexing in elasticsearch: %s\n", id.Hex())
+		indexer := es.NewBulkIndexer(1000)
+		indexer.Start()
+
+		go func() {
+			for {
+				for err := range indexer.ErrorChannel {
+					log.Error("index error: %s", err)
 				}
-			}(index, *collection, val)
+			}
+		}()
+
+		for v := range ch {
+			id := v["id"].(bson.ObjectId).Hex()
+			err := indexer.Index(index, *collection, id, "", "", nil, v, false)
+			if err != nil {
+				log.Error("error indexing in elasticsearch: %s (id: %s)", err, id)
+				ch <- v
+			} else {
+				log.Debug("indexed: %s", id)
+			}
 		}
 	}()
 
 	for {
 		s := session.Copy()
 		c := s.DB("").C(*collection)
-		iter := c.Find(bson.M{"_project": project}).Iter()
+		iter := c.Find(bson.M{"_project": *project}).Iter()
 
-		fmt.Printf("in outer loop\n")
 		for iter.Next(&val) {
 			v := make(map[string]interface{})
 
 			// elasticsearch prefixes metadata with underscores so we remove them
 			for k, value := range val {
-				if re.Match([]byte(k)) == false {
-					continue
-				}
-				delete(v, k)
 				k = re.ReplaceAllString(k, "")
 				v[k] = value
 			}
@@ -82,7 +87,7 @@ func main() {
 			continue
 		}
 		if err := iter.Close(); err != nil {
-			fmt.Printf("error in iteration: %s\n", err)
+			log.Error("error in iteration: %s", err)
 		}
 		s.Close()
 	}
